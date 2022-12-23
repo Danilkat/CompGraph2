@@ -1,10 +1,14 @@
 import tkinter as tk
+
+import PIL.Image
 import numpy as np
 import cv2 as cv
 from skimage import io
 from tkinter import filedialog
 from PIL import ImageTk, Image
 from enum import Enum
+import warnings
+warnings.filterwarnings("error")
 
 class convolution_grid(tk.Frame):
 
@@ -65,21 +69,23 @@ class AffineTransformController:
         self.change_mode(Modes.ADD_DEST)
 
     def add_point(self, event):
-        point = self.event_to_point(event)
+        if type(event) == tk.Event:
+            point = self.event_to_point(event)
+        elif type(event) == list:
+            point = event
 
         if self.mode == Modes.ADD_SRC:
             self.src_points.append(point)
             if len(self.src_points) > 3:
                 self.src_points.pop(0)
-            print(self.src_points)
 
         if self.mode == Modes.ADD_DEST:
             self.dest_points.append(point)
             if len(self.dest_points) > 3:
                 self.dest_points.pop(0)
-            print(self.dest_points)
 
         if len(self.src_points) == 3 and len(self.dest_points) == 3:
+            self.get_matrix()
             self.change_mode(Modes.READY)
 
         return self.mode
@@ -87,8 +93,10 @@ class AffineTransformController:
     def clear_points(self):
         self.src_points = []
         self.dest_points = []
+        self.uninverted_matrix = 0
         self.matrix = 0
         self.mode = Modes.NONE
+        self.scale_type = None
 
     def event_to_point(self, event):
         point = [event.x, event.y]
@@ -98,21 +106,41 @@ class AffineTransformController:
         src_arr = np.array(self.src_points).astype(np.float32)
         dest_arr = np.array(self.dest_points).astype(np.float32)
         matrix = cv.getAffineTransform(src_arr, dest_arr)
+        if matrix[0][0] + matrix[1][1] > 2:
+            self.scale_type = Scales.UPSCALE
+        else:
+            self.scale_type = Scales.DOWNSCALE
+        self.uninverted_matrix = matrix
         matrix = np.append(matrix, [[0,0,1]], axis=0)
         matrix = np.linalg.inv(matrix)
 
         self.matrix = matrix
-
-    def define_scale_operation(self):
-        if type(self.matrix) == int:
-            raise ValueError("Matrix is not defined!")
-        return (Scales.UPSCALE, Scales.DOWNSCALE)[self.matrix[0][0] + self.matrix[1][1] < 2]
+        return self.matrix
 
     def get_point(self, point):
-        if type(self.matrix) == int:
-            self.get_matrix()
         point = np.array(point + [1]).astype(np.float32)
-        return self.matrix.dot(point)
+        return (self.matrix.dot(point))[:2]
+
+    def get_reverse_point(self, point):
+        point = np.array(point + [1]).astype(np.float32)
+        return (self.uninverted_matrix.dot(point))[:2]
+
+    def create_mipmap(self, initial_image_size, mipmap_level):
+        self.clear_points()
+        w,h = initial_image_size
+
+        self.set_src_points()
+        self.add_point([0,h])
+        self.add_point([0, 0])
+        self.add_point([w, 0])
+
+        self.set_dest_points()
+        self.add_point([0,h//mipmap_level])
+        self.add_point([0, 0])
+        self.add_point([w//mipmap_level, 0])
+        self.get_matrix()
+        return self
+
 
 
 class App(tk.Tk):
@@ -166,8 +194,27 @@ class App(tk.Tk):
 
         w = self.img.width()
         h = self.img.height()
+
+        self.image_mipmaps = []
+        self.image_mipmaps.append(self.image_array.copy())
+        # self.image_mipmaps.append(np.array(pil_img.resize((w//2,h//2))))
+        # self.image_mipmaps.append(np.array(pil_img.resize((w//4,h//4))))
+        # self.image_mipmaps.append(np.array(pil_img.resize((w//8,h//8))))
+        # self.image_mipmaps.append(np.array(pil_img.resize((w//16,h//16))))
+        self.image_mipmaps.append(np.array(Image.new("RGB", (w//2, h//2), (255,0,0))))
+        self.image_mipmaps.append(np.array(Image.new("RGB", (w//4, h//4), (0,255,0))))
+        self.image_mipmaps.append(np.array(Image.new("RGB", (w//8, h//8), (0,0,255))))
+        self.image_mipmaps.append(np.array(Image.new("RGB", (w//16, h//16), (255,125,125))))
+        self.image_mipmap_controllers = []
+        self.image_mipmap_controllers.append(AffineTransformController().create_mipmap((w,h), 1))
+        self.image_mipmap_controllers.append(AffineTransformController().create_mipmap((w,h), 2))
+        self.image_mipmap_controllers.append(AffineTransformController().create_mipmap((w,h), 4))
+        self.image_mipmap_controllers.append(AffineTransformController().create_mipmap((w,h), 8))
+        self.image_mipmap_controllers.append(AffineTransformController().create_mipmap((w,h), 16))
+
+
         self.canva.config(width = w, height = h)
-        self.image_cont = self.canva.create_image((w/2,h/2), image=self.img)
+        self.image_cont = self.canva.create_image((w/2,h/2), image= self.img)
 
     def convolute_command(self):
         start_array = self.image_array.copy().astype("int")
@@ -208,19 +255,60 @@ class App(tk.Tk):
         start_array = self.image_array.copy()
         start_array = start_array
         shape = self.image_array.shape
-        print(shape)
+        is_downscale = False
+        if self.affine_controller.scale_type == Scales.DOWNSCALE:
+            is_downscale = True
 
         for i in range(shape[1]):
             for j in range(shape[0]):
-                point = self.affine_controller.get_point([i, j])[:2]
+                point = self.affine_controller.get_point([i, j])
 
                 if self.is_simpliest.get():
                     point = np.rint(point).astype("int")
                     self.image_array[j][i] = self.safe_access_image_array(start_array, point[1], point[0])
                 else:
-                    self.image_array[j][i] = self.bilinear_interpolation(start_array, point)
+                    if is_downscale:
+                        self.image_array[j][i] = self.trilinear_interpolation(point)
+                    else:
+                        self.image_array[j][i] = self.bilinear_interpolation(start_array, point)
 
         self.update_image()
+
+    def trilinear_interpolation(self, point):
+        x, y = point
+        fx, fy = np.floor(point)
+        cx, cy = np.ceil(point)
+        px0 = self.affine_controller.get_reverse_point([fx, y])
+        px1 = self.affine_controller.get_reverse_point([cx, y])
+        py0 = self.affine_controller.get_reverse_point([x, fy])
+        py1 = self.affine_controller.get_reverse_point([x, cy])
+        Kx = np.abs(px1[0] - px0[0])
+        Ky = np.abs(py1[1] - py0[1])
+        try:
+            K = 1/(2*Ky) + 1/(2*Kx)
+        except RuntimeWarning:
+            K = 1.5
+        i = 1.0
+        m_mipmap_contr = None
+        m2_mipmap_contr = None
+        m_mipmap_arr = None
+        m2_mipmap_arr = None
+        for n in range(5):
+            if i < K < 2.0 * i:
+                m_mipmap_contr = self.image_mipmap_controllers[n]
+                m2_mipmap_contr = self.image_mipmap_controllers[n+1]
+                m_mipmap_arr = self.image_mipmaps[n]
+                m2_mipmap_arr = self.image_mipmaps[n+1]
+                break
+            i *= 2.0
+        print(K)
+        m_point = m_mipmap_contr.get_reverse_point(list(point))
+        m2_point = m2_mipmap_contr.get_reverse_point(list(point))
+        my, mx = np.rint(m_point).astype("int")
+        m2y, m2x = np.rint(m2_point).astype("int")
+        m_rgb = self.safe_access_image_array(m_mipmap_arr, mx, my)
+        m2_rgb = self.safe_access_image_array(m2_mipmap_arr, m2x, m2y)
+        return (m_rgb * (i*2 - K) + m2_rgb * (K - i)) / i
 
     def safe_access_image_array(self, arr, x, y):
         if x < 0 or x >= arr.shape[0]:

@@ -44,6 +44,10 @@ class Modes(Enum):
     ADD_DEST = 2
     READY = 3
 
+class Scales(Enum):
+    UPSCALE = 0
+    DOWNSCALE = 1
+
 class AffineTransformController:
 
     def __init__(self):
@@ -93,17 +97,16 @@ class AffineTransformController:
     def get_matrix(self):
         src_arr = np.array(self.src_points).astype(np.float32)
         dest_arr = np.array(self.dest_points).astype(np.float32)
-        print(src_arr, dest_arr)
         matrix = cv.getAffineTransform(src_arr, dest_arr)
         matrix = np.append(matrix, [[0,0,1]], axis=0)
-        print(matrix)
         matrix = np.linalg.inv(matrix)
-        print(matrix)
-        if matrix[0][0] + matrix[1][1] < 2:
-            print("уменьшение!")
-        else:
-            print("увеличение!")
+
         self.matrix = matrix
+
+    def define_scale_operation(self):
+        if type(self.matrix) == int:
+            raise ValueError("Matrix is not defined!")
+        return (Scales.UPSCALE, Scales.DOWNSCALE)[self.matrix[0][0] + self.matrix[1][1] < 2]
 
     def get_point(self, point):
         if type(self.matrix) == int:
@@ -141,6 +144,11 @@ class App(tk.Tk):
         self.button_clr = tk.Button(self.frame_right, text="Удалить точки", command=self.affine_controller.clear_points)
         self.button_clr.pack()
 
+        self.is_simpliest = tk.BooleanVar()
+
+        self.check_simpliest = tk.Checkbutton(self.frame_right, text="Использовать простейший алгоритм", variable=self.is_simpliest, onvalue=True, offvalue=False)
+        self.check_simpliest.pack()
+
         self.button_transform = tk.Button(self.frame_right, text="Провести аффинную трансформацию", state="disabled", command=self.affine_command)
         self.button_transform.pack()
 
@@ -152,7 +160,7 @@ class App(tk.Tk):
 
     def open_image(self):
         path = filedialog.askopenfilename(title='open')
-        pil_img = Image.open(path)
+        pil_img = Image.open(path).convert("RGB")
         self.image_array = np.array(pil_img)
         self.img = ImageTk.PhotoImage(pil_img)
 
@@ -202,29 +210,34 @@ class App(tk.Tk):
         shape = self.image_array.shape
         print(shape)
 
-        for i in range(shape[0]):
-            for j in range(shape[1]):
-                point = self.affine_controller.get_point([i, j])
-                point = np.rint(point).astype("int")
+        for i in range(shape[1]):
+            for j in range(shape[0]):
+                point = self.affine_controller.get_point([i, j])[:2]
 
-                #print(point)
-                if point[0] < 0 or point[1] < 0 or point[0] >= shape[0] or point[1] >= shape[1]:
-                    self.image_array[j][i] = [255,255,255]
+                if self.is_simpliest.get():
+                    point = np.rint(point).astype("int")
+                    self.image_array[j][i] = self.safe_access_image_array(start_array, point[1], point[0])
                 else:
-                    self.image_array[j][i] = start_array[point[1]][point[0]]
-        #self.affine_controller.get_point([0,0])
-        #self.image_array = cv.warpAffine(start_array, self.affine_controller.matrix[:2], (shape[1], shape[0]), cv.WARP_INVERSE_MAP)
+                    self.image_array[j][i] = self.bilinear_interpolation(start_array, point)
+
         self.update_image()
 
-    def bilinear_interpolation(self, point_float):
-        x,y = point_float[0], point_float[1]
-        fx, fy = np.floor(x), np.floor(y)
-        cx, cy = np.ceil(x), np.ceil(y)
+    def safe_access_image_array(self, arr, x, y):
+        if x < 0 or x >= arr.shape[0]:
+            return np.array([0, 0, 0])
+        if y < 0 or y >= arr.shape[1]:
+            return np.array([0, 0, 0])
+        return arr[x, y]
 
-        return (self.image_array[fx, fy] * (cx - x) +
-               self.image_array[cx, fy] * (x - fx)) * (cy - y) + \
-               (self.image_array[fx, cy] * (cx - x) +
-                self.image_array[cx, cy] * (x - fx)) * (y - fy)
+    def bilinear_interpolation(self,arr, point_float):
+        y,x = point_float
+        fy, fx = np.floor(point_float).astype("int")
+        cy, cx = np.ceil(point_float).astype("int")
+
+        return (self.safe_access_image_array(arr, fx, fy) * (cx - x) +
+               self.safe_access_image_array(arr, cx, fy) * (x - fx)) * (cy - y) + \
+               (self.safe_access_image_array(arr, fx, cy) * (cx - x) +
+                self.safe_access_image_array(arr, cx, cy) * (x - fx)) * (y - fy)
 
     def add_point(self, event):
         if self.affine_controller.mode == Modes.READY:
